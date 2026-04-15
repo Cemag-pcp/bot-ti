@@ -82,6 +82,7 @@ async function decideNextStep({ message, profile, requester, draft, locations, l
     "- Se o solicitante nao esta cadastrado e o nome do WhatsApp esta disponivel, confirme esse nome antes de pedir a matricula.",
     "- Pergunte de forma natural algo como: 'Estou vendo que seu nome e X, correto? Se nao, digite o nome correto.'",
     "- Peca um dado por vez, na ordem: confirmacao do nome > matricula > descricao do problema > setor.",
+    "- IMPORTANTE: interprete a resposta do usuario com base na ultima mensagem que voce enviou. Se voce pediu a matricula e o usuario respondeu apenas com numeros ou alfanumericos, isso E a matricula — extraia em extracted.matricula. Se voce pediu o setor e o usuario respondeu com um nome, isso E o setor. Nao repita uma pergunta que o usuario acabou de responder.",
     "- Se o usuario ja descreveu o problema na mensagem atual (extracted.description nao eh null), NAO peca mais detalhes sobre o problema. Avance imediatamente para o proximo campo faltante (geralmente o setor).",
     "- Se o solicitante ja esta cadastrado (situacao: Cadastrado), pule confirmacao de nome e matricula. Comece pedindo a descricao ou setor conforme o que ja foi coletado.",
     "- Se o usuario confirmar o nome (sim/correto/isso/exato/etc), salve o nome em extracted.name e extracted.name_confirmed = true.",
