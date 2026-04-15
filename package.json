@@ -1,0 +1,24 @@
+{
+  "name": "waha-local-bot",
+  "version": "1.0.0",
+  "description": "Bot local para WhatsApp usando WAHA",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "setup:session": "node scripts/setup-session.js"
+  },
+  "keywords": [
+    "waha",
+    "whatsapp",
+    "bot"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "form-data": "^4.0.5",
+    "pg": "^8.20.0"
+  }
+}

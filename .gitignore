@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime files
+*.pid
+*.pid.lock
+*.seed
+*.out
+*.err
+
+# Coverage and reports
+coverage/
+.nyc_output/
+
+# Build and cache directories
+dist/
+build/
+.cache/
+.tmp/
+tmp/
+temp/
+
+# WAHA / local runtime data
+data/
+qr-test.png
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-journal
+
+# Editor and IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+
+# Local agent/tooling folders
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,20 @@
+services:
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: waha
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      WAHA_API_KEY: troque-esta-chave
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: admin
+      WAHA_DASHBOARD_PASSWORD: admin123
+      WHATSAPP_SWAGGER_ENABLED: "true"
+      WHATSAPP_SWAGGER_USERNAME: admin
+      WHATSAPP_SWAGGER_PASSWORD: admin123
+      WHATSAPP_API_KEY_EXCLUDE_PATH: api/screenshot,api/:session/auth/qr,ping,health
+      WHATSAPP_FILES_LIFETIME: "0"
+    volumes:
+      - ./data/waha:/app/.sessions
+      - ./data/media:/tmp/whatsapp-files
