@@ -11,7 +11,7 @@ const {
 const { resolveLidToPhone, sendSeen, sendText } = require("./waha-client");
 const { decideNextStep, generateTitle, hasMistralConfig } = require("./mistral-client");
 const { hasGroqConfig, downloadAudio, transcribeAudio, getAudioUrl } = require("./groq-client");
-const { openTicket } = require("./ticket-client");
+const { openTicket, getDeviceTypes } = require("./ticket-client");
 
 const processedMessages = new Map();
 const PROCESSED_TTL_MS = 5 * 60 * 1000;
@@ -330,9 +330,13 @@ async function handleIncomingMessage(event) {
     whatsapp_name: payload.pushName || payload.notifyName || payload._data?.notifyName || payload._data?.pushName || null
   };
 
-  const [conversation, locations] = await Promise.all([
+  const [conversation, locations, deviceTypes] = await Promise.all([
     getConversation(phone),
-    getTicketLocations()
+    getTicketLocations(),
+    getDeviceTypes().catch((err) => {
+      console.warn("[bot] falha ao buscar device types:", err.message);
+      return [];
+    })
   ]);
 
   if (conversation?.state === "human_handoff") {
@@ -384,6 +388,7 @@ async function handleIncomingMessage(event) {
     requester,
     draft,
     locations,
+    deviceTypes,
     lastReply
   });
 
@@ -416,7 +421,8 @@ async function handleIncomingMessage(event) {
     category: extracted.category,
     priority: extracted.priority,
     location_name: extracted.location_name,
-    asset_tag: extracted.asset_tag
+    asset_tag: extracted.asset_tag,
+    device_name: extracted.device_name
   });
 
   if (draft.location_name) {
@@ -475,12 +481,17 @@ async function handleIncomingMessage(event) {
     const effectiveMatricula = requester?.matricula || draft.matricula;
     const hasConfirmedRequester = Boolean(requester || (draft.name && draft.name_confirmed === true));
 
+    const isHardware = (draft.category || "").toUpperCase() === "HARDWARE";
+    const needsDeviceName = isHardware && !draft.device_name;
+
     const isReady = Boolean(
       location &&
         draft.title &&
         draft.description &&
+        draft.priority &&
         effectiveMatricula &&
-        hasConfirmedRequester
+        hasConfirmedRequester &&
+        !needsDeviceName
     );
 
     if (!isReady) {
@@ -495,6 +506,10 @@ async function handleIncomingMessage(event) {
         collectReply = "Qual e o problema que esta enfrentando?";
       } else if (!location) {
         collectReply = "Em qual setor voce esta?";
+      } else if (needsDeviceName) {
+        collectReply = "Qual equipamento esta com problema?";
+      } else if (!draft.priority) {
+        collectReply = "Isso esta te impedindo de trabalhar agora?";
       } else {
         collectReply = "Faltam algumas informacoes. Pode me dizer em qual setor voce esta?";
       }
@@ -540,7 +555,8 @@ async function handleIncomingMessage(event) {
       category: draft.category || DEFAULT_CATEGORY,
       priority: effectivePriority,
       location_name: location.name,
-      asset_tag: draft.asset_tag || ""
+      asset_tag: draft.asset_tag || "",
+      device_name: draft.device_name || (isHardware ? "" : "Outro")
     };
 
     const result = await openTicket(ticketPayload);

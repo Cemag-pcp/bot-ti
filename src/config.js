@@ -25,6 +25,8 @@ module.exports = {
   mistralApiKey: process.env.MISTRAL_API_KEY || "",
   groqApiKey: process.env.GROQ_API_KEY || "",
   mistralModel: process.env.MISTRAL_MODEL || "mistral-small-2506",
+  sgtiBaseUrl: (process.env.SGTI_BASE_URL || "https://sgti.onrender.com").replace(/\/+$/, ""),
+  sgtiDevicesPath: process.env.SGTI_DEVICES_PATH || "/tickets/api/devices/",
   wahaBaseUrl: required("WAHA_BASE_URL", "http://localhost:3000").replace(/\/+$/, ""),
   wahaApiKey: required("WAHA_API_KEY"),
   wahaSession: process.env.WAHA_SESSION || "default",
