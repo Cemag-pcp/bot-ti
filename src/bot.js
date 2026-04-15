@@ -3,6 +3,7 @@ const {
   extractPhone,
   getConversation,
   getRequesterByPhone,
+  getStaleHandoffConversations,
   getTicketLocations,
   upsertRequesterProfile,
   upsertConversation
@@ -16,6 +17,7 @@ const processedMessages = new Map();
 const PROCESSED_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_CATEGORY = "OTHER";
 const DEFAULT_PRIORITY = "MEDIUM";
+const HANDOFF_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutos
 
 function rememberMessage(id) {
   const now = Date.now();
@@ -214,6 +216,8 @@ async function handleIncomingMessage(event) {
   }
 
   const session = event.session || "default";
+
+  // Verificacao antecipada de human_handoff (precisa so do phone)
   const phoneResolution = await resolveSenderPhone({ payload, session });
   const phone = phoneResolution.phone;
 
@@ -283,6 +287,25 @@ async function handleIncomingMessage(event) {
     getConversation(phone),
     getTicketLocations()
   ]);
+
+  if (conversation?.state === "human_handoff") {
+    const lastActivity = conversation.last_message_at
+      ? new Date(conversation.last_message_at).getTime()
+      : 0;
+    const elapsed = Date.now() - lastActivity;
+
+    if (elapsed < HANDOFF_TIMEOUT_MS) {
+      console.log("[bot] human_handoff ativo, ignorando mensagem de", phone);
+      return { ignored: true, reason: "human-handoff-active" };
+    }
+
+    // Timeout expirado: retoma o bot e continua processando esta mensagem
+    console.log("[bot] human_handoff expirado apos", Math.round(elapsed / 1000), "s — retomando bot para", phone);
+    const timeoutReply = "O atendente nao esta disponivel no momento. Posso te ajudar por aqui. Como posso te ajudar?";
+    await upsertConversation({ phoneNumber: phone, state: "idle", context: { draft: {}, last_reply: null } });
+    await sendReply({ session, chatId: payload.from, messageId: payload.id, text: timeoutReply });
+    return { ignored: false, chatId: payload.from, reply: timeoutReply };
+  }
 
   let requester = await getRequesterByPhone(phone);
 
@@ -383,6 +406,23 @@ async function handleIncomingMessage(event) {
     });
   }
 
+  if (action === "TRANSFER_TO_HUMAN") {
+    await persistConversation(phone, "human_handoff", {
+      draft,
+      last_reply: reply
+    });
+
+    await sendReply({
+      session,
+      chatId: payload.from,
+      messageId: payload.id,
+      text: reply
+    });
+
+    console.log("[bot] transferido para atendente humano:", phone);
+    return { ignored: false, chatId: payload.from, reply };
+  }
+
   if (action === "OPEN_TICKET") {
     const location = resolveLocation(draft.location_name, locations);
     const effectiveMatricula = requester?.matricula || draft.matricula;
@@ -480,6 +520,26 @@ async function handleIncomingMessage(event) {
   return { ignored: false, chatId: payload.from, reply };
 }
 
+async function resumeStaleHandoffs({ session }) {
+  const stale = await getStaleHandoffConversations(HANDOFF_TIMEOUT_MS);
+
+  for (const conv of stale) {
+    const phone = conv.phone_number;
+    const chatId = `${phone}@c.us`;
+
+    try {
+      await upsertConversation({ phoneNumber: phone, state: "idle", context: { draft: {}, last_reply: null } });
+      await sendText({ session, chatId, text: "O atendente nao esta disponivel no momento. Posso te ajudar por aqui. Como posso te ajudar?" });
+      console.log("[bot] handoff expirado retomado automaticamente para", phone);
+    } catch (error) {
+      console.error("[bot] erro ao retomar handoff para", phone, error.message);
+    }
+  }
+
+  return stale.length;
+}
+
 module.exports = {
-  handleIncomingMessage
+  handleIncomingMessage,
+  resumeStaleHandoffs
 };

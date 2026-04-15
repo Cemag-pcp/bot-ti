@@ -261,11 +261,26 @@ async function upsertConversation({ phoneNumber, state, context }) {
   return result.rows[0] || null;
 }
 
+async function getStaleHandoffConversations(thresholdMs) {
+  const result = await query(
+    `
+      SELECT *
+      FROM ${publicTable("tickets_whatsappconversation")}
+      WHERE state = 'human_handoff'
+        AND last_message_at < NOW() - ($1 || ' milliseconds')::interval
+    `,
+    [String(thresholdMs)]
+  );
+
+  return result.rows;
+}
+
 module.exports = {
   extractBestPhone,
   extractPhone,
   getConversation,
   getRequesterByPhone,
+  getStaleHandoffConversations,
   getTicketLocations,
   initDatabase,
   upsertRequesterProfile,
