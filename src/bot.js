@@ -19,6 +19,53 @@ const DEFAULT_CATEGORY = "OTHER";
 const DEFAULT_PRIORITY = "MEDIUM";
 const HANDOFF_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutos
 
+const PRODUCTION_SECTOR_KEYWORDS = [
+  "producao", "producão", "produção", "corte", "estamparia", "serra",
+  "usinagem", "pintura", "montagem", "solda", "soldagem", "conformacao",
+  "conformação", "prensa", "expedicao", "expedição", "injecao", "injeção"
+];
+
+const CRITICAL_PROBLEM_KEYWORDS = [
+  "sem internet", "sem rede", "sem conexao", "sem conexão", "net caiu",
+  "internet caiu", "rede caiu", "wifi caiu", "wi-fi caiu", "cabo nao funciona",
+  "cabo não funciona", "sem acesso a rede", "sem acesso à rede", "sem acesso a internet",
+  "sem acesso à internet", "parou a producao", "parou a produção", "parou producao",
+  "parou produção", "producao parada", "produção parada", "nao consigo trabalhar",
+  "não consigo trabalhar", "maquina parada", "máquina parada"
+];
+
+const HIGH_PROBLEM_KEYWORDS = [
+  "urgente", "rapido", "rápido", "preciso agora", "parou", "travou tudo",
+  "varios usuarios", "vários usuários", "todo setor", "setor inteiro"
+];
+
+function inferPriority(locationName, description) {
+  const loc = normalizeValue(locationName || "");
+  const desc = normalizeValue(description || "");
+
+  const isProductionSector = PRODUCTION_SECTOR_KEYWORDS.some(
+    (kw) => loc.includes(normalizeValue(kw))
+  );
+
+  const isCriticalProblem = CRITICAL_PROBLEM_KEYWORDS.some(
+    (kw) => desc.includes(normalizeValue(kw))
+  );
+
+  if (isProductionSector || isCriticalProblem) {
+    return "CRITICAL";
+  }
+
+  const isHighProblem = HIGH_PROBLEM_KEYWORDS.some(
+    (kw) => desc.includes(normalizeValue(kw))
+  );
+
+  if (isHighProblem) {
+    return "HIGH";
+  }
+
+  return null; // sem inferencia — usar o que o LLM definiu ou MEDIUM
+}
+
 function rememberMessage(id) {
   const now = Date.now();
   processedMessages.set(id, now);
@@ -467,6 +514,18 @@ async function handleIncomingMessage(event) {
       return { ignored: false, chatId: payload.from, reply: collectReply };
     }
 
+    const PRIORITY_RANK = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+    const llmPriority = draft.priority || DEFAULT_PRIORITY;
+    const autoPriority = inferPriority(location.name, draft.description);
+    const effectivePriority =
+      autoPriority && (PRIORITY_RANK[autoPriority] > PRIORITY_RANK[llmPriority])
+        ? autoPriority
+        : llmPriority;
+
+    if (autoPriority && autoPriority !== llmPriority) {
+      console.log("[bot] prioridade elevada automaticamente:", llmPriority, "→", effectivePriority, "| setor:", location.name);
+    }
+
     const ticketPayload = {
       matricula: effectiveMatricula,
       requester_name:
@@ -479,7 +538,7 @@ async function handleIncomingMessage(event) {
       title: draft.title,
       description: draft.description,
       category: draft.category || DEFAULT_CATEGORY,
-      priority: draft.priority || DEFAULT_PRIORITY,
+      priority: effectivePriority,
       location_name: location.name,
       asset_tag: draft.asset_tag || ""
     };
