@@ -1,7 +1,7 @@
 const axios = require("axios");
 
 const client = axios.create({
-  baseURL: "http://localhost:8000",
+  baseURL: "https://sgti.onrender.com",
   timeout: 30000,
   headers: {
     "Content-Type": "application/json"
