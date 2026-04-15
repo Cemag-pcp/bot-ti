@@ -425,9 +425,21 @@ async function handleIncomingMessage(event) {
     device_name: extracted.device_name
   });
 
-  if (draft.location_name) {
+  if (extracted.location_name) {
+    const resolved = resolveLocation(extracted.location_name, locations);
+    if (resolved) {
+      draft.location_name = resolved.name;
+      delete draft.location_name_unresolved;
+    } else {
+      draft.location_name_unresolved = extracted.location_name;
+      draft.location_name = null;
+    }
+  } else if (draft.location_name) {
     const resolved = resolveLocation(draft.location_name, locations);
-    draft.location_name = resolved ? resolved.name : null;
+    if (!resolved) {
+      draft.location_name_unresolved = draft.location_name_unresolved || draft.location_name;
+      draft.location_name = null;
+    }
   }
 
   if (!draft.title && draft.description) {
@@ -505,7 +517,12 @@ async function handleIncomingMessage(event) {
       } else if (!draft.description) {
         collectReply = "Qual e o problema que esta enfrentando?";
       } else if (!location) {
-        collectReply = "Em qual setor voce esta?";
+        if (draft.location_name_unresolved && locations.length > 0) {
+          const locationList = locations.map((l) => l.name).join(", ");
+          collectReply = `Nao encontrei o setor "${draft.location_name_unresolved}". Os setores disponíveis são: ${locationList}. Em qual você está?`;
+        } else {
+          collectReply = "Em qual setor voce esta?";
+        }
       } else if (needsDeviceName) {
         collectReply = "Qual equipamento esta com problema?";
       } else if (!draft.priority) {
