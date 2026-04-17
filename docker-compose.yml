@@ -1,4 +1,17 @@
 services:
+  bot:
+    image: node:18-alpine
+    container_name: bot-ti
+    restart: unless-stopped
+    network_mode: host
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: node src/index.js
+    env_file: .env
+    depends_on:
+      - waha
+
   waha:
     image: devlikeapro/waha:latest
     container_name: waha
@@ -15,6 +28,9 @@ services:
       WHATSAPP_SWAGGER_PASSWORD: admin123
       WHATSAPP_API_KEY_EXCLUDE_PATH: api/screenshot,api/:session/auth/qr,ping,health
       WHATSAPP_FILES_LIFETIME: "0"
+      WHATSAPP_DEFAULT_SESSION: default
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data/waha:/app/.sessions
       - ./data/media:/tmp/whatsapp-files

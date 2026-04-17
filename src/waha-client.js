@@ -32,6 +32,14 @@ async function sendSeen({ chatId, session = config.wahaSession, messageIds }) {
   return response.data;
 }
 
+async function startTyping({ chatId, session = config.wahaSession }) {
+  await client.post("/api/startTyping", { session, chatId });
+}
+
+async function stopTyping({ chatId, session = config.wahaSession }) {
+  await client.post("/api/stopTyping", { session, chatId });
+}
+
 async function stopSession(name = config.wahaSession) {
   await client.post(`/api/sessions/${encodeURIComponent(name)}/stop`);
 }
@@ -90,5 +98,7 @@ module.exports = {
   sendSeen,
   sendText,
   startSession,
+  startTyping,
+  stopTyping,
   getQrUrl
 };

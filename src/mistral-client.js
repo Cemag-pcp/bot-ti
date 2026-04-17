@@ -1,17 +1,25 @@
 const axios = require("axios");
 const config = require("./config");
 
-const client = axios.create({
-  baseURL: "https://api.mistral.ai",
-  timeout: 30000,
-  headers: {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${config.mistralApiKey}`
-  }
-});
+const useOllama = Boolean(config.ollamaBaseUrl);
+
+const client = useOllama
+  ? axios.create({
+      baseURL: config.ollamaBaseUrl,
+      timeout: 60000,
+      headers: { "Content-Type": "application/json" }
+    })
+  : axios.create({
+      baseURL: "https://api.mistral.ai",
+      timeout: 30000,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.mistralApiKey}`
+      }
+    });
 
 function hasMistralConfig() {
-  return Boolean(config.mistralApiKey);
+  return useOllama || Boolean(config.mistralApiKey);
 }
 
 function parseJsonObject(text) {
@@ -27,7 +35,7 @@ function parseJsonObject(text) {
   return JSON.parse(candidate);
 }
 
-async function decideNextStep({ message, profile, requester, draft, locations, deviceTypes, lastReply }) {
+async function decideNextStep({ message, profile, requester, draft, locations, deviceTypes, history, lastTicketLocation }) {
   if (!hasMistralConfig()) {
     throw new Error("MISTRAL_API_KEY nao configurada");
   }
@@ -76,7 +84,7 @@ async function decideNextStep({ message, profile, requester, draft, locations, d
     "  - matricula: numero de matricula do solicitante.",
     "  - description: descricao do problema relatado pelo usuario.",
     "  - location_name: setor onde o usuario esta (deve ser um dos setores validos listados).",
-    "  - device_name: equipamento envolvido quando a categoria for HARDWARE. Para categorias SOFTWARE, NETWORK, ACCESS e OTHER, use 'Outro' como valor padrao.",
+    "  - device_name: equipamento envolvido quando a categoria for HARDWARE. Para categorias SOFTWARE, NETWORK, ACCESS e OTHER, defina SEMPRE device_name='Outro' automaticamente sem perguntar ao usuario.",
     "  - priority: prioridade do chamado (ver regras abaixo).",
     "Campos gerados automaticamente (NAO pergunte ao usuario):",
     "  - title: resumo curto gerado a partir da description.",
@@ -98,7 +106,7 @@ async function decideNextStep({ message, profile, requester, draft, locations, d
     "- Nesses casos, use COLLECT ou OUT_OF_SCOPE e responda naturalmente.",
     "- Nunca abra chamado reaproveitando um draft antigo quando a mensagem atual nao trouxer informacao util nova.",
     "- TRANSFER_TO_HUMAN: use quando o usuario pedir explicitamente para falar com um atendente, humano ou pessoa real.",
-    "- OUT_OF_SCOPE: use APENAS quando a mensagem claramente nao tiver relacao com TI (ex: saude, RH, assuntos pessoais). Qualquer mensagem sobre rede, internet, computador, sistema, acesso, impressora, telefone, equipamento ou software e SEMPRE escopo de TI.",
+    "- OUT_OF_SCOPE: use SOMENTE quando tiver 100% de certeza que a mensagem nao tem nenhuma relacao com TI (ex: saude, vendas de imoveis, RH, assuntos pessoais). Em caso de duvida, use COLLECT. Qualquer mencao a senha, acesso, sistema, programa, equipamento, rede ou software e escopo de TI.",
     "- COLLECT: use em todos os outros casos. Peca naturalmente o que estiver faltando.",
     "",
     "=== ORDEM DE COLETA ===",
@@ -107,13 +115,16 @@ async function decideNextStep({ message, profile, requester, draft, locations, d
     "  2. Matricula (se nao cadastrado)",
     "  3. Descricao do problema (se nao informada) — ao receber, extraia automaticamente device_name, category e title",
     "  4. Setor (location_name)",
-    "  5. device_name — APENAS se category for HARDWARE e nao tiver sido extraido da descricao. Pergunte: 'Qual equipamento esta com problema?'",
+    "  5. device_name — APENAS se category for HARDWARE e nao tiver sido extraido da descricao. Pergunte: 'Qual equipamento esta com problema?'. NUNCA pergunte device_name se category for SOFTWARE, NETWORK, ACCESS ou OTHER — nesses casos use automaticamente device_name='Outro' sem perguntar.",
     "  6. Prioridade — apenas se nao puder ser determinada automaticamente (ver regras abaixo)",
+    "",
+    "REGRA CRITICA sobre saudacoes: quando o usuario enviar apenas uma saudacao ('oi', 'ola', 'bom dia', etc.) sem informar o problema, NUNCA pergunte o setor como primeira pergunta. Siga a ordem: confirme o nome se necessario, depois pergunte qual e o problema. So pergunte o setor APOS ter a descricao do problema.",
     "",
     "IMPORTANTE sobre interpretacao de respostas:",
     "- Interprete a resposta do usuario com base na ultima mensagem que voce enviou.",
     "- Se voce pediu a matricula e o usuario respondeu com numeros/alfanumericos, isso E a matricula.",
     "- Se voce pediu o setor e o usuario respondeu com um nome, isso E o setor.",
+    "- Se voce perguntou 'Continua sendo o setor X?' ou 'Sua ultima solicitacao foi para o setor X. Continua sendo esse setor?' e o usuario confirmar (sim, correto, isso, exato, pode ser, ta bom, etc.), extraia location_name = X (o setor exato mencionado na sua ultima mensagem enviada).",
     "- Se voce pediu o equipamento e o usuario respondeu com um nome de device, isso E o device_name.",
     "- Se voce pediu a descricao do problema e o usuario respondeu (mesmo com poucas palavras como 'nao liga', 'travou', 'lento', 'nao abre', 'tela preta', 'sem sinal'), isso E a descricao — extraia em extracted.description e avance para o proximo campo. Nao peca mais detalhes do problema.",
     "- Nao repita uma pergunta que o usuario acabou de responder.",
@@ -161,33 +172,58 @@ async function decideNextStep({ message, profile, requester, draft, locations, d
   const confirmedName = draft?.name_confirmed === true ? draft?.name : null;
   const effectiveName = confirmedName || requester?.full_name || null;
 
-  const userContent = [
-    `Mensagem atual do usuario: "${message}"`,
+  const contextContent = [
     effectiveName
-      ? `Nome confirmado do usuario: ${effectiveName} (use este nome para se dirigir ao usuario)`
-      : `Nome no WhatsApp (ainda nao confirmado): ${profile?.whatsapp_name || "Nao informado"}`,
-    `Telefone: ${profile?.phone || "Nao informado"}`,
+      ? `Nome confirmado do usuario: ${effectiveName}`
+      : `Nome no WhatsApp (nao confirmado): ${profile?.whatsapp_name || "Nao informado"}`,
     `Situacao do solicitante: ${requesterInfo}`,
     `Dados ja coletados: ${draftInfo}`,
-    lastReply ? `Ultima mensagem que voce enviou: "${lastReply}"` : null,
+    null,
     `Setores validos: ${locationList}`,
-    deviceList ? `Dispositivos cadastrados (use o nome mais proximo ao que o usuario descreveu): ${deviceList}` : null
+    deviceList ? `Dispositivos cadastrados: ${deviceList}` : null
   ]
     .filter(Boolean)
     .join("\n");
 
-  const response = await client.post("/v1/chat/completions", {
-    model: config.mistralModel,
+  // Historico de conversa como mensagens multi-turn (max 10 turnos)
+  const historyMessages = (history || []).slice(-10).map((h) => ({
+    role: h.role,
+    content: h.content
+  }));
+
+  // Primeira mensagem de usuario carrega o contexto; as demais sao apenas o texto
+  const firstUserMessage = historyMessages.length === 0
+    ? `${contextContent}\n\nMensagem: "${message}"`
+    : contextContent;
+
+  const model = useOllama ? (config.ollamaModel || "qwen2.5:7b") : config.mistralModel;
+  const body = {
+    model,
     temperature: 0.2,
-    max_tokens: 500,
-    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: userContent }
+      { role: "user", content: firstUserMessage },
+      ...historyMessages,
+      ...(historyMessages.length > 0 ? [{ role: "user", content: message }] : [])
     ]
-  });
+  };
 
-  const content = response.data?.choices?.[0]?.message?.content?.trim() || "{}";
+  if (useOllama) {
+    body.stream = false;
+    body.format = "json";
+    body.keep_alive = -1;
+    body.options = { num_predict: 500 };
+  } else {
+    body.max_tokens = 500;
+    body.response_format = { type: "json_object" };
+  }
+
+  const endpoint = useOllama ? "/api/chat" : "/v1/chat/completions";
+  const response = await client.post(endpoint, body);
+
+  const content = useOllama
+    ? (response.data?.message?.content?.trim() || "{}")
+    : (response.data?.choices?.[0]?.message?.content?.trim() || "{}");
   const parsed = parseJsonObject(content);
 
   return {
@@ -212,8 +248,9 @@ async function decideNextStep({ message, profile, requester, draft, locations, d
 async function generateTitle(description) {
   if (!hasMistralConfig()) return null;
 
+  const model = useOllama ? (config.ollamaModel || "qwen2.5:7b") : config.mistralModel;
   const response = await client.post("/v1/chat/completions", {
-    model: config.mistralModel,
+    model,
     temperature: 0.2,
     max_tokens: 60,
     messages: [

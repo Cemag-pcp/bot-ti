@@ -8,16 +8,37 @@ const {
   upsertRequesterProfile,
   upsertConversation
 } = require("./database");
-const { resolveLidToPhone, sendSeen, sendText } = require("./waha-client");
+const { resolveLidToPhone, sendSeen, sendText, startTyping, stopTyping } = require("./waha-client");
 const { decideNextStep, generateTitle, hasMistralConfig } = require("./mistral-client");
 const { hasGroqConfig, downloadAudio, transcribeAudio, getAudioUrl } = require("./groq-client");
-const { openTicket, getDeviceTypes } = require("./ticket-client");
+const { openTicket, getDeviceTypes, getLastTicket } = require("./ticket-client");
 
 const processedMessages = new Map();
 const PROCESSED_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_CATEGORY = "OTHER";
 const DEFAULT_PRIORITY = "MEDIUM";
 const HANDOFF_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutos
+const SESSION_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutos sem atividade reinicia a sessao
+
+let deviceTypesCache = null;
+let deviceTypesCachedAt = 0;
+const DEVICE_TYPES_CACHE_TTL = 10 * 60 * 1000; // 10 minutos
+
+async function getCachedDeviceTypes() {
+  const now = Date.now();
+  if (deviceTypesCache && (now - deviceTypesCachedAt) < DEVICE_TYPES_CACHE_TTL) {
+    return deviceTypesCache;
+  }
+  try {
+    const types = await getDeviceTypes();
+    deviceTypesCache = types;
+    deviceTypesCachedAt = now;
+    return types;
+  } catch (err) {
+    console.warn("[bot] falha ao buscar device types:", err.message);
+    return deviceTypesCache || [];
+  }
+}
 
 const PRODUCTION_SECTOR_KEYWORDS = [
   "producao", "producão", "produção", "corte", "estamparia", "serra",
@@ -223,8 +244,19 @@ function hasMeaningfulExtraction(extracted) {
       extracted?.category ||
       extracted?.priority ||
       extracted?.location_name ||
+      extracted?.device_name ||
       extracted?.name_confirmed === true
   );
+}
+
+function buildHistory(existingHistory, userMessage, assistantReply) {
+  const updated = [
+    ...(existingHistory || []),
+    { role: "user", content: userMessage },
+    { role: "assistant", content: assistantReply }
+  ];
+  // Manter apenas os ultimos 10 turnos (20 mensagens) para nao inflar o contexto
+  return updated.slice(-20);
 }
 
 async function persistConversation(phone, state, context) {
@@ -232,8 +264,10 @@ async function persistConversation(phone, state, context) {
 }
 
 async function sendReply({ session, chatId, messageId, text }) {
-  await sendSeen({ session, chatId, messageIds: [messageId] });
-  await sendText({ session, chatId, text, replyTo: messageId });
+  await sendSeen({ session, chatId, messageIds: [messageId] }).catch(() => {});
+  await sendText({ session, chatId, text })
+    .catch(() => sendText({ session, chatId, text }))
+    .catch((err) => console.error("[bot] falha ao enviar mensagem:", err.message));
 }
 
 async function handleIncomingMessage(event) {
@@ -330,13 +364,10 @@ async function handleIncomingMessage(event) {
     whatsapp_name: payload.pushName || payload.notifyName || payload._data?.notifyName || payload._data?.pushName || null
   };
 
-  const [conversation, locations, deviceTypes] = await Promise.all([
+  let [conversation, locations, deviceTypes] = await Promise.all([
     getConversation(phone),
     getTicketLocations(),
-    getDeviceTypes().catch((err) => {
-      console.warn("[bot] falha ao buscar device types:", err.message);
-      return [];
-    })
+    getCachedDeviceTypes()
   ]);
 
   if (conversation?.state === "human_handoff") {
@@ -360,9 +391,24 @@ async function handleIncomingMessage(event) {
 
   let requester = await getRequesterByPhone(phone);
 
+  // Timeout de sessao: se inativo por mais de 3 minutos em conversa ativa, reinicia
+  const lastActivity = conversation?.last_message_at
+    ? new Date(conversation.last_message_at).getTime()
+    : 0;
+  const sessionElapsed = Date.now() - lastActivity;
+  const activeState = conversation?.state && conversation.state !== "idle" && conversation.state !== "ticket_opened";
+  if (activeState && sessionElapsed > SESSION_TIMEOUT_MS) {
+    console.log("[bot] sessao expirada apos", Math.round(sessionElapsed / 1000), "s — reiniciando para", phone);
+    await upsertConversation({ phoneNumber: phone, state: "idle", context: { draft: {}, history: [] } });
+    conversation = { ...conversation, state: "idle", context: { draft: {}, history: [] } };
+  }
+
   const prevState = conversation?.state || null;
-  let draft = prevState === "ticket_opened" ? {} : conversation?.context?.draft || {};
-  const lastReply = conversation?.context?.last_reply || null;
+  const isNewSession = prevState === "ticket_opened" || prevState === "idle" || !prevState;
+  let draft = isNewSession ? {} : conversation?.context?.draft || {};
+  let history = isNewSession ? [] : (conversation?.context?.history || []);
+
+
 
   console.log(
     "[bot] incoming",
@@ -382,24 +428,25 @@ async function handleIncomingMessage(event) {
     return { ignored: false, chatId: payload.from, reply };
   }
 
-  const { action, reply, extracted } = await decideNextStep({
+  let { action, reply, extracted } = await decideNextStep({
     message,
     profile,
     requester,
     draft,
     locations,
     deviceTypes,
-    lastReply
+    history
   });
 
   console.log("[bot] llm decision", JSON.stringify({ action, extracted }));
+
 
   if (prevState === "collecting" && !hasMeaningfulExtraction(extracted) && action === "OPEN_TICKET") {
     const safeReply = "Ola! Como posso te ajudar?";
 
     await persistConversation(phone, "idle", {
       draft: {},
-      last_reply: safeReply
+      history: []
     });
 
     await sendReply({
@@ -442,6 +489,30 @@ async function handleIncomingMessage(event) {
     }
   }
 
+  // Resolver device_name extraido pelo LLM para device_type_id
+  if (extracted.device_name && deviceTypes.length > 0) {
+    const norm = (s) => String(s || "").toLowerCase().trim();
+    const resolved = deviceTypes.find((d) =>
+      norm(d.name) === norm(extracted.device_name) ||
+      norm(d.name).includes(norm(extracted.device_name)) ||
+      norm(extracted.device_name).includes(norm(d.name))
+    );
+    if (resolved) {
+      draft.device_type_id = resolved.id;
+    } else {
+      // Nome nao reconhecido — pedir novamente
+      delete draft.device_type_id;
+    }
+  }
+
+  // Auto-inferir prioridade pela descricao se ainda nao definida
+  if (!draft.priority && draft.description) {
+    const earlyPriority = inferPriority(draft.location_name || "", draft.description);
+    if (earlyPriority) {
+      draft.priority = earlyPriority;
+    }
+  }
+
   if (!draft.title && draft.description) {
     const generatedTitle = await generateTitle(draft.description);
     draft.title = generatedTitle || draft.description.substring(0, 80);
@@ -471,10 +542,26 @@ async function handleIncomingMessage(event) {
     });
   }
 
+  // Se o LLM disse COLLECT mas o draft ja tem todos os campos obrigatorios, abre o chamado diretamente
+  if (action === "COLLECT") {
+    const autoLocation = resolveLocation(draft.location_name, locations);
+    const autoMatricula = requester?.matricula || draft.matricula;
+    const autoHasRequester = Boolean(requester || (draft.name && draft.name_confirmed === true));
+    const autoIsHardware = (draft.category || "").toUpperCase() === "HARDWARE";
+    const autoNeedsDevice = autoIsHardware && !draft.device_type_id;
+
+    if (autoLocation && draft.title && draft.description && draft.priority && autoMatricula && autoHasRequester && !autoNeedsDevice) {
+      action = "OPEN_TICKET";
+      const name = requester?.full_name || (draft.name_confirmed === true ? draft.name : null);
+      reply = name ? `Entendido, ${name}. Vou abrir o chamado agora.` : "Entendido. Vou abrir o chamado agora.";
+      console.log("[bot] auto-upgrade COLLECT → OPEN_TICKET: draft completo detectado");
+    }
+  }
+
   if (action === "TRANSFER_TO_HUMAN") {
     await persistConversation(phone, "human_handoff", {
       draft,
-      last_reply: reply
+      history: buildHistory(history, message, reply)
     });
 
     await sendReply({
@@ -494,7 +581,7 @@ async function handleIncomingMessage(event) {
     const hasConfirmedRequester = Boolean(requester || (draft.name && draft.name_confirmed === true));
 
     const isHardware = (draft.category || "").toUpperCase() === "HARDWARE";
-    const needsDeviceName = isHardware && !draft.device_name;
+    const needsDeviceName = isHardware && !draft.device_type_id;
 
     const isReady = Boolean(
       location &&
@@ -524,7 +611,10 @@ async function handleIncomingMessage(event) {
           collectReply = "Em qual setor voce esta?";
         }
       } else if (needsDeviceName) {
-        collectReply = "Qual equipamento esta com problema?";
+        const typeList = deviceTypes.length > 0
+          ? deviceTypes.map((d) => d.name).join(", ")
+          : "Impressora, Notebook, Desktop, Camera, Outro";
+        collectReply = `Qual e o tipo de equipamento com problema? (${typeList})`;
       } else if (!draft.priority) {
         collectReply = "Isso esta te impedindo de trabalhar agora?";
       } else {
@@ -533,7 +623,7 @@ async function handleIncomingMessage(event) {
 
       await persistConversation(phone, "collecting", {
         draft,
-        last_reply: collectReply
+        history: buildHistory(history, message, collectReply)
       });
 
       await sendReply({
@@ -573,18 +663,28 @@ async function handleIncomingMessage(event) {
       priority: effectivePriority,
       location_name: location.name,
       asset_tag: draft.asset_tag || "",
-      device_name: draft.device_name || (isHardware ? "" : "Outro")
+      device_id: isHardware
+        ? (draft.device_type_id || (deviceTypes.find((d) => d.name === "Outro")?.id || 5))
+        : (deviceTypes.find((d) => d.name === "Outro")?.id || 5)
     };
 
-    const result = await openTicket(ticketPayload);
+    console.log("[bot] ticketPayload:", JSON.stringify(ticketPayload));
+    let result;
+    try {
+      result = await openTicket(ticketPayload);
+    } catch (ticketErr) {
+      const errBody = ticketErr.response?.data;
+      console.error("[bot] ERRO openTicket status:", ticketErr.response?.status, "body:", JSON.stringify(errBody));
+      throw ticketErr;
+    }
     const ticket = result.ticket;
 
+    const finalReply = `${reply}\n\nNumero: ${ticket.ticket_number}. Status: ${ticket.status}.`;
     await persistConversation(phone, "ticket_opened", {
       draft,
-      ticket
+      ticket,
+      history: buildHistory(history, message, finalReply)
     });
-
-    const finalReply = `${reply}\n\nNumero: ${ticket.ticket_number}. Status: ${ticket.status}.`;
     await sendReply({
       session,
       chatId: payload.from,
@@ -599,7 +699,7 @@ async function handleIncomingMessage(event) {
 
   await persistConversation(phone, nextState, {
     draft,
-    last_reply: reply
+    history: buildHistory(history, message, reply)
   });
 
   await sendReply({

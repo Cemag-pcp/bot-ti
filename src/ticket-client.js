@@ -18,8 +18,8 @@ async function getDeviceTypes() {
   const response = await client.get(config.sgtiDevicesPath);
   const data = response.data;
 
-  // Suporta { results: [...] } (paginado) ou array direto
-  const items = Array.isArray(data) ? data : (data?.results ?? []);
+  // Suporta { results: [...] }, { devices: [...] } (paginado) ou array direto
+  const items = Array.isArray(data) ? data : (data?.results ?? data?.devices ?? []);
 
   return items.map((item) => ({
     id: item.id ?? null,
@@ -27,7 +27,19 @@ async function getDeviceTypes() {
   })).filter((item) => item.name);
 }
 
+async function getLastTicket(matricula) {
+  if (!matricula) return null;
+  try {
+    const response = await client.get(`/tickets/api/last-ticket/?matricula=${encodeURIComponent(matricula)}`);
+    const data = response.data;
+    return data?.found ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   openTicket,
-  getDeviceTypes
+  getDeviceTypes,
+  getLastTicket
 };
